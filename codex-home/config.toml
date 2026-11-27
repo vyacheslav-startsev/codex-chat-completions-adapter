@@ -1,0 +1,11 @@
+# Чистый профиль Codex для GigaChat 4 через адаптер.
+# Запуск: CODEX_HOME=/путь/к/codex-home codex
+model = "GigaChat/GigaChat-4-708B-A41"
+model_provider = "cloudru"
+
+[model_providers.cloudru]
+name = "GigaChat (Cloud.ru) через responses_adapter"
+base_url = "http://127.0.0.1:8094/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false

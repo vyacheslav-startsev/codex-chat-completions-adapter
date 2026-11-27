@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.log
+.env
+codex-home/*
+!codex-home/config.toml
