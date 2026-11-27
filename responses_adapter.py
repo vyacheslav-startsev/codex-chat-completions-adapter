@@ -28,6 +28,24 @@ from urllib.parse import urlsplit
 
 CFG = {}
 
+# Сжатие контекста. Когда история не помещается в окно модели, Codex присылает
+# в конце input элемент {"type": "compaction_trigger"} и ждёт в ответ ровно один
+# элемент {"type": "compaction", "encrypted_content": ...}. Адаптер просит модель
+# составить сводку работы и кладёт её текст в encrypted_content. В следующих
+# запросах Codex присылает этот элемент вместо старой истории, и адаптер
+# превращает его обратно в сообщение со сводкой.
+COMPACT_PROMPT = (
+    "The conversation is about to be truncated. Write a handoff summary for another "
+    "assistant that will continue this task from here. Include: the goal and constraints, "
+    "what has been done and the key decisions, the current state of files and commands, "
+    "important data and findings, and clear next steps. Be concise and concrete."
+)
+SUMMARY_PREFIX = (
+    "Earlier part of this conversation was compacted. Summary of the work done so far, "
+    "written by the assistant that started the task:\n\n"
+)
+COMPACTION_TYPES = ("compaction", "compaction_summary", "context_compaction")
+
 
 def text_of(content):
     if isinstance(content, str):
@@ -88,12 +106,15 @@ def build_messages(req):
                 "type": "function",
                 "function": {"name": it.get("name"), "arguments": it.get("arguments") or "{}"},
             })
+        elif t in COMPACTION_TYPES and it.get("encrypted_content"):
+            flush()
+            msgs.append({"role": "user", "content": SUMMARY_PREFIX + it["encrypted_content"]})
         elif t == "function_call_output":
             flush()
             out = it.get("output")
             msgs.append({"role": "tool", "tool_call_id": it.get("call_id"),
                          "content": out if isinstance(out, str) else text_of(out) or json.dumps(out, ensure_ascii=False)})
-        # прочие типы (web_search_call, custom_tool_call и т.п.) пропускаем
+        # прочие типы (web_search_call, custom_tool_call, compaction_trigger и т.п.) пропускаем
     flush()
     return msgs
 
@@ -128,9 +149,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers(); return
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         alias = req.get("model", "")
-        body = {"model": CFG["aliases"].get(alias, alias), "messages": build_messages(req), "stream": True,
+        items = req.get("input") if isinstance(req.get("input"), list) else []
+        compact = any(isinstance(i, dict) and i.get("type") == "compaction_trigger" for i in items)
+        messages = build_messages(req)
+        if compact:
+            messages.append({"role": "user", "content": COMPACT_PROMPT})
+        body = {"model": CFG["aliases"].get(alias, alias), "messages": messages, "stream": True,
                 "stream_options": {"include_usage": True}}
-        tools = build_tools(req)
+        tools = [] if compact else build_tools(req)
         if tools:
             body["tools"] = tools
             tc = req.get("tool_choice")
@@ -197,7 +223,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if r_part:
                         reasoning.append(r_part)
                         self.wfile.write(b": thinking\n\n"); self.wfile.flush()
-                    if d.get("content"):
+                    if d.get("content") and compact:
+                        text.append(d["content"])
+                    elif d.get("content"):
                         emit_reasoning()
                         if msg_item is None:
                             msg_item = {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant",
@@ -216,12 +244,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             c["name"] += f["name"]
                         if f.get("arguments"):
                             c["args"].append(f["arguments"])
-            emit_reasoning()
+            if compact:
+                item = {"id": "cmp_" + uuid.uuid4().hex, "type": "compaction",
+                        "encrypted_content": "".join(text).strip() or "(empty summary)"}
+                self.sse("response.output_item.added", {"output_index": 0, "item": item})
+                self.sse("response.output_item.done", {"output_index": 0, "item": item})
+                output.append(item)
+                sys.stderr.write(f"compaction: summary {len(item['encrypted_content'])} chars\n")
+            else:
+                emit_reasoning()
             if msg_item is not None:
                 msg_item.update(status="completed", content=[{"type": "output_text", "text": "".join(text), "annotations": []}])
                 self.sse("response.output_item.done", {"output_index": msg_index, "item": msg_item})
                 output.insert(msg_index, msg_item) if msg_index <= len(output) else output.append(msg_item)
-            for k in sorted(calls):
+            for k in ([] if compact else sorted(calls)):
                 c = calls[k]
                 cid = c["id"] or "call_" + uuid.uuid4().hex
                 item = {"id": "fc_" + uuid.uuid4().hex, "type": "function_call", "status": "completed",
