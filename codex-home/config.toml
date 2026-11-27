@@ -3,6 +3,10 @@
 model = "GigaChat/GigaChat-4-708B-A41"
 model_provider = "cloudru"
 
+# Окно контекста GigaChat 4 в Cloud.ru 1 млн токенов. Без каталога Codex
+# считает 272 тыс. и начинает сжимать историю около 245 тыс. Путь относительно CODEX_HOME.
+model_catalog_json = "gigachat-catalog.json"
+
 [model_providers.cloudru]
 name = "GigaChat (Cloud.ru) через responses_adapter"
 base_url = "http://127.0.0.1:8094/v1"
